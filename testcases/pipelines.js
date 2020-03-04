@@ -308,45 +308,48 @@ generateTestCase({
     pipeline: [{$limit: 250}]
 });
 
+function getBackingCollection(isView, collectionOrView) {
+    if (isView) {
+        // 'collectionOrView' is an identity view, so specify a backing collection to serve as
+        // its source and perform the view creation.
+        const viewName = collectionOrView.getName();
+        const backingCollName = viewName + "_backing";
+        assert.commandWorked(db.createView(viewName, backingCollName, []));
+        return db[backingCollName];
+    } else {
+        return collectionOrView;
+    }
+}
 /**
- * Data population functions used by the 'Lookup' and 'LookupViaGraphLookup' tests.
+ * Basic function to populate documents in the given collections. The 'foreignCollsInfo' array
+ * should have the information about collections that need to be populated with documents.
+ * Each object in 'foreignCollsInfo' array should have a 'suffix' field representing the collection
+ * name and 'docGen' field representing the function used for document generation.
  */
-function basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache) {
+function basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo, nDocs, postFunction}) {
     return function(collectionOrView) {
-        var db = collectionOrView.getDB();
-        var lookupCollName = collectionOrView.getName() + "_lookup";
-        var lookupCollection = db[lookupCollName];
-        var sourceCollection;
-
+        const db = collectionOrView.getDB();
         collectionOrView.drop();
-        lookupCollection.drop();
-
-        if (isView) {
-            // 'collectionOrView' is an identity view, so specify a backing collection to serve as
-            // its source and perform the view creation.
-            var viewName = collectionOrView.getName();
-            var backingCollName = viewName + "_backing";
-            sourceCollection = db[backingCollName];
-            assert.commandWorked(db.createView(viewName, backingCollName, []));
-        } else {
-            sourceCollection = collectionOrView;
+        const sourceCollection = getBackingCollection(isView, collectionOrView);
+        
+        for (let foreignCollInfo of foreignCollsInfo) {
+            const foreignCollName = collectionOrView.getName() + foreignCollInfo.suffix;
+            const foreignCollection = db[foreignCollName];
+            foreignCollection.drop();
+            const foreignBulk = foreignCollection.initializeUnorderedBulkOp();
+            for (let i = 0; i < nDocs; i++) {
+                foreignBulk.insert(foreignCollInfo.docGen(i));
+            }
+            foreignBulk.execute();
         }
-
-        var sourceBulk = sourceCollection.initializeUnorderedBulkOp();
-        var lookupBulk = lookupCollection.initializeUnorderedBulkOp();
-        for (var i = 0; i < nDocs; i++) {
+        const sourceBulk = sourceCollection.initializeUnorderedBulkOp();
+        for (let i = 0; i < nDocs; i++) {
             sourceBulk.insert(localDocGen(i));
-            lookupBulk.insert(foreignDocGen(i));
         }
         sourceBulk.execute();
-        lookupBulk.execute();
-
-        var cacheSize = kDefaultDocumentSourceLookupCacheSize;
-        if (disableCache) {
-            cacheSize = 0;
+        if (postFunction) {
+            postFunction();
         }
-
-        setDocumentSourceLookupCacheSize(cacheSize);
     };
 }
 
@@ -363,8 +366,7 @@ function basicLookupPopulator(isView) {
     }
 
     var nDocs = 100;
-    var disableCache = false;
-    return basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache);
+    return basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo: [{suffix: "_lookup", docGen: foreignDocGen}], nDocs});
 }
 
 /**
@@ -381,8 +383,7 @@ function basicArrayLookupPopulator(isView) {
     }
 
     var nDocs = 100;
-    var disableCache = false;
-    return basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache);
+    return basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo: [{suffix: "_lookup", docGen: foreignDocGen}], nDocs});
 }
 
 /**
@@ -399,8 +400,7 @@ function basicArrayOfObjectLookupPopulator(isView) {
     }
 
     var nDocs = 50;
-    var disableCache = false;
-    return basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache);
+    return basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo: [{suffix: "_lookup", docGen: foreignDocGen}], nDocs});
 }
 
 /**
@@ -419,7 +419,10 @@ function basicUncorrelatedPipelineLookupPopulator(isView, disableCache) {
     if (disableCache === undefined) {
         disableCache = false;
     }
-    return basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache);
+    return basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo: [{suffix: "_lookup", docGen: foreignDocGen}], nDocs, postFunction: (disableCache ? (function() {
+            setDocumentSourceLookupCacheSize(0);
+        })
+                                    : undefined) });
 }
 
 /**
@@ -1335,4 +1338,167 @@ generateTestCase({
     indices: [{x: 1}],
     docGenerator: sortGroupBigDocGenerator,
     pipeline: [{$sort: {x: 1}}, {$group: {_id: "$z", x: {$last: "$x"}, y: {$last: "$y"}}}]
+});
+
+
+/**
+ * Basic test case with a $unionWith stage.
+ */
+generateTestCase({
+    name: "UnionWith.Basic",
+    tags: ["unionWith", ">=4.3.5"],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [{
+                suffix: "_unionWith",
+                docGen: function f(i) {
+                    return {_id: i};
+                }
+            }],
+            localDocGen: function f(i) {
+                return {_id: i};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith"].drop();
+    },
+    pipeline: [{$unionWith: {coll: '#B_COLL_unionWith'}}]
+});
+
+/**
+ * Test case with multiple levels of $unionWith and no indexes present.
+ */
+generateTestCase({
+    name: "UnionWith.MultiLevelNoIndex",
+    tags: ["unionWith", ">=4.3.5"],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [
+                {
+                    suffix: "_unionWith1",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                },
+                {
+                    suffix: "_unionWith2",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                }
+            ],
+            localDocGen: function docGenerator(val) {
+                return {_id: val, a: val, b: val};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith2"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith1"].drop();
+    },
+    pipeline: [{
+        $match: {a: 1}},  {
+        $unionWith: {
+            coll: '#B_COLL_unionWith1',
+            pipeline: [
+                {
+                    $unionWith: {
+                        coll: '#B_COLL_unionWith2',
+                        pipeline: [{$unionWith: {coll: '#B_COLL', pipeline: [{$match: {b: 1}}]}}]
+                    }
+                }
+            ]
+        }
+    }]
+});
+
+/**
+ * Test case with multiple levels of $unionWith and indexes present for corresponding $match stages.
+ */
+generateTestCase({
+    name: "UnionWith.MultiLevelWithIndex",
+    tags: ["unionWith", ">=4.3.5"],
+    indices: [{a: 1},{b: 1}],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [
+                {
+                    suffix: "_unionWith1",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                },
+                {
+                    suffix: "_unionWith2",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                }
+            ],
+            localDocGen: function docGenerator(val) {
+                return {_id: val, a: val, b: val};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith2"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith1"].drop();
+    },
+    pipeline: [{
+        $match: {a: 1}}, {
+        $unionWith: {
+            coll: '#B_COLL_unionWith1',
+            pipeline: [
+                {
+                    $unionWith: {
+                        coll: '#B_COLL_unionWith2',
+                        pipeline: [{$unionWith: {coll: '#B_COLL', pipeline: [{$match: {b: 1}}]}}]
+                    }
+                }
+            ]
+        }
+    }]
+});
+
+
+/**
+ * Test case where a $unionWith'd pipeline has a blocking stage.
+ */
+generateTestCase({
+    name: "UnionWith.BlockingStage",
+    tags: ["unionWith", ">=4.3.5"],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [{
+                suffix: "_unionWith",
+                docGen: function f(i) {
+                    return {_id: i, val: i};
+                }
+            }],
+            localDocGen: function f(i) {
+                return {_id: i, val: i};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith"].drop();
+    },
+    pipeline: [{$unionWith: {coll: '#B_COLL_unionWith', pipeline: [{$sort: {val: 1}}]}}]
 });
