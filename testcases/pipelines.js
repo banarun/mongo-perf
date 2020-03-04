@@ -1336,3 +1336,116 @@ generateTestCase({
     docGenerator: sortGroupBigDocGenerator,
     pipeline: [{$sort: {x: 1}}, {$group: {_id: "$z", x: {$last: "$x"}, y: {$last: "$y"}}}]
 });
+
+/**
+ * Basic function to populate documents in the given collections.
+ */
+function basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo, nDocs}) {
+    return function(collectionOrView) {
+        const db = collectionOrView.getDB();
+        collectionOrView.drop();
+
+        let sourceCollection;
+        if (isView) {
+            // 'collectionOrView' is an identity view, so specify a backing collection to serve as
+            // its source and perform the view creation.
+            const viewName = collectionOrView.getName();
+            const backingCollName = viewName + "_backing";
+            sourceCollection = db[backingCollName];
+            assert.commandWorked(db.createView(viewName, backingCollName, []));
+        } else {
+            sourceCollection = collectionOrView;
+        }
+        const sourceBulk = sourceCollection.initializeUnorderedBulkOp();
+        for (let foreignCollInfo of foreignCollsInfo) {
+            const foreignCollName = collectionOrView.getName() + foreignCollInfo.suffix;
+            jsTestLog("Hello2" + tojson(foreignCollName));
+            const foreignCollection = db[foreignCollName];
+            foreignCollection.drop();
+            const foreignBulk = foreignCollection.initializeUnorderedBulkOp();
+            for (let i = 0; i < nDocs; i++) {
+                foreignBulk.insert(foreignCollInfo.docGen(i));
+            }
+            foreignBulk.execute();
+        }
+        for (let i = 0; i < nDocs; i++) {
+            sourceBulk.insert(localDocGen(i));
+        }
+        sourceBulk.execute();
+    };
+}
+
+generateTestCase({
+    name: "BasicUnionWith",
+    tags: ["unionWith"],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [{
+                suffix: "_unionWith",
+                docGen: function f(i) {
+                    return {_id: i};
+                }
+            }],
+            localDocGen: function f(i) {
+                return {_id: i};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith"].drop();
+    },
+    pipeline: [{$unionWith: {coll: '#B_COLL_unionWith'}}]
+});
+
+generateTestCase({
+    name: "MultiLevelUnionWith",
+    tags: ["unionWith"],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [
+                {
+                    suffix: "_unionWith1",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                },
+                {
+                    suffix: "_unionWith2",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                },
+                {
+                    suffix: "_unionWith3",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                }
+            ],
+            localDocGen: function docGenerator(val) {
+                return {_id: val};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith2"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith1"].drop();
+    },
+    pipeline: [{
+        $unionWith: {
+            coll: '#B_COLL_unionWith1',
+            pipeline: [{
+                $unionWith:
+                    {coll: '#B_COLL_unionWith2', pipeline: [{$unionWith: '#B_COLL_unionWith3'}]}
+            }]
+        }
+    }]
+});
