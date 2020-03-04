@@ -1336,3 +1336,154 @@ generateTestCase({
     docGenerator: sortGroupBigDocGenerator,
     pipeline: [{$sort: {x: 1}}, {$group: {_id: "$z", x: {$last: "$x"}, y: {$last: "$y"}}}]
 });
+
+/**
+ * Basic function to populate documents in the given collections. The 'foreignCollsInfo' array
+ * should have the information about the all collections that needs to be populated with documents.
+ * Each object in 'foreignCollsInfo' array should have a 'suffix' field representing the collection
+ * name and 'docGen' field representing the function used for document generation.
+ */
+function basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo, nDocs}) {
+    return function(collectionOrView) {
+        const db = collectionOrView.getDB();
+        collectionOrView.drop();
+
+        let sourceCollection;
+        if (isView) {
+            // 'collectionOrView' is an identity view, so specify a backing collection to serve as
+            // its source and perform the view creation.
+            const viewName = collectionOrView.getName();
+            const backingCollName = viewName + "_backing";
+            sourceCollection = db[backingCollName];
+            assert.commandWorked(db.createView(viewName, backingCollName, []));
+        } else {
+            sourceCollection = collectionOrView;
+        }
+        for (let foreignCollInfo of foreignCollsInfo) {
+            const foreignCollName = collectionOrView.getName() + foreignCollInfo.suffix;
+            const foreignCollection = db[foreignCollName];
+            foreignCollection.drop();
+            const foreignBulk = foreignCollection.initializeUnorderedBulkOp();
+            for (let i = 0; i < nDocs; i++) {
+                foreignBulk.insert(foreignCollInfo.docGen(i));
+            }
+            foreignBulk.execute();
+        }
+        const sourceBulk = sourceCollection.initializeUnorderedBulkOp();
+        for (let i = 0; i < nDocs; i++) {
+            sourceBulk.insert(localDocGen(i));
+        }
+        sourceBulk.execute();
+    };
+}
+
+/**
+ * Basic test case with a $unionWith stage.
+ */
+generateTestCase({
+    name: "UnionWith.Basic",
+    tags: ["unionWith"],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [{
+                suffix: "_unionWith",
+                docGen: function f(i) {
+                    return {_id: i};
+                }
+            }],
+            localDocGen: function f(i) {
+                return {_id: i};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith"].drop();
+    },
+    pipeline: [{$unionWith: {coll: '#B_COLL_unionWith'}}]
+});
+
+/**
+ * Test case with multipe levels of $unionWith stages.
+ */
+generateTestCase({
+    name: "UnionWith.MultiLevel",
+    tags: ["unionWith"],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [
+                {
+                    suffix: "_unionWith1",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                },
+                {
+                    suffix: "_unionWith2",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                },
+                {
+                    suffix: "_unionWith3",
+                    docGen: function docGenerator(val) {
+                        return {_id: val};
+                    }
+                }
+            ],
+            localDocGen: function docGenerator(val) {
+                return {_id: val};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith3"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith2"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith1"].drop();
+    },
+    pipeline: [{
+        $unionWith: {
+            coll: '#B_COLL_unionWith1',
+            pipeline: [{
+                $unionWith:
+                    {coll: '#B_COLL_unionWith2', pipeline: [{$unionWith: '#B_COLL_unionWith3'}]}
+            }]
+        }
+    }]
+});
+
+/**
+ * Test case where a $unionWith'd pipeline has a blocking stage.
+ */
+generateTestCase({
+    name: "UnionWith.BlockingStage",
+    tags: ["unionWith"],
+    pre: function basicUnionFun(isView) {
+        return basicMultiCollectionDataPopulator({
+            isView: isView,
+            foreignCollsInfo: [{
+                suffix: "_unionWith",
+                docGen: function f(i) {
+                    return {_id: i, val: i};
+                }
+            }],
+            localDocGen: function f(i) {
+                return {_id: i, val: i};
+            },
+            nDocs: 1000
+        });
+    },
+    post: function cleanup(sourceColl) {
+        sourceColl.drop();
+        sourceColl.getDB()[sourceColl.getName() + "_backing"].drop();
+        sourceColl.getDB()[sourceColl.getName() + "_unionWith"].drop();
+    },
+    pipeline: [{$unionWith: {coll: '#B_COLL_unionWith', pipeline: [{$sort: {val: 1}}]}}]
+});
