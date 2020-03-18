@@ -309,6 +309,48 @@ generateTestCase({
 });
 
 /**
+ * Basic function to populate documents in the given collections. The 'foreignCollsInfo' array
+ * should have the information about collections that need to be populated with documents.
+ * Each object in 'foreignCollsInfo' array should have a 'suffix' field representing the collection
+ * name and 'docGen' field representing the function used for document generation.
+ */
+function basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo, nDocs, postFunction}) {
+    return function(collectionOrView) {
+        const db = collectionOrView.getDB();
+        collectionOrView.drop();
+
+        let sourceCollection;
+        if (isView) {
+            // 'collectionOrView' is an identity view, so specify a backing collection to serve as
+            // its source and perform the view creation.
+            const viewName = collectionOrView.getName();
+            const backingCollName = viewName + "_backing";
+            sourceCollection = db[backingCollName];
+            assert.commandWorked(db.createView(viewName, backingCollName, []));
+        } else {
+            sourceCollection = collectionOrView;
+        }
+        for (let foreignCollInfo of foreignCollsInfo) {
+            const foreignCollName = collectionOrView.getName() + foreignCollInfo.suffix;
+            const foreignCollection = db[foreignCollName];
+            foreignCollection.drop();
+            const foreignBulk = foreignCollection.initializeUnorderedBulkOp();
+            for (let i = 0; i < nDocs; i++) {
+                foreignBulk.insert(foreignCollInfo.docGen(i));
+            }
+            foreignBulk.execute();
+        }
+        const sourceBulk = sourceCollection.initializeUnorderedBulkOp();
+        for (let i = 0; i < nDocs; i++) {
+            sourceBulk.insert(localDocGen(i));
+        }
+        sourceBulk.execute();
+        if (postFunction) {
+            postFunction();
+        }
+    };
+}
+/**
  * Data population functions used by the 'Lookup' and 'LookupViaGraphLookup' tests.
  */
 function basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache) {
@@ -363,8 +405,7 @@ function basicLookupPopulator(isView) {
     }
 
     var nDocs = 100;
-    var disableCache = false;
-    return basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache);
+    return basicMultiCollectionDataPopulator({isView, localDocGen, [{suffix: "_lookup", docGen: foreignDocGen}], nDocs});
 }
 
 /**
@@ -381,8 +422,7 @@ function basicArrayLookupPopulator(isView) {
     }
 
     var nDocs = 100;
-    var disableCache = false;
-    return basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache);
+    return basicMultiCollectionDataPopulator({isView, localDocGen, [{suffix: "_lookup", docGen: foreignDocGen}], nDocs});
 }
 
 /**
@@ -399,8 +439,7 @@ function basicArrayOfObjectLookupPopulator(isView) {
     }
 
     var nDocs = 50;
-    var disableCache = false;
-    return basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache);
+    return basicMultiCollectionDataPopulator({isView, localDocGen, [{suffix: "_lookup", docGen: foreignDocGen}], nDocs});
 }
 
 /**
@@ -419,7 +458,7 @@ function basicUncorrelatedPipelineLookupPopulator(isView, disableCache) {
     if (disableCache === undefined) {
         disableCache = false;
     }
-    return basicLookupPopulatorImpl(isView, localDocGen, foreignDocGen, nDocs, disableCache);
+    return basicMultiCollectionDataPopulator({isView, localDocGen, [{suffix: "_lookup", docGen: foreignDocGen}], nDocs, disableCache ? (function () { setDocumentSourceLookupCacheSize(0); }): undefined });
 }
 
 /**
@@ -1337,52 +1376,13 @@ generateTestCase({
     pipeline: [{$sort: {x: 1}}, {$group: {_id: "$z", x: {$last: "$x"}, y: {$last: "$y"}}}]
 });
 
-/**
- * Basic function to populate documents in the given collections. The 'foreignCollsInfo' array
- * should have the information about the all collections that needs to be populated with documents.
- * Each object in 'foreignCollsInfo' array should have a 'suffix' field representing the collection
- * name and 'docGen' field representing the function used for document generation.
- */
-function basicMultiCollectionDataPopulator({isView, localDocGen, foreignCollsInfo, nDocs}) {
-    return function(collectionOrView) {
-        const db = collectionOrView.getDB();
-        collectionOrView.drop();
-
-        let sourceCollection;
-        if (isView) {
-            // 'collectionOrView' is an identity view, so specify a backing collection to serve as
-            // its source and perform the view creation.
-            const viewName = collectionOrView.getName();
-            const backingCollName = viewName + "_backing";
-            sourceCollection = db[backingCollName];
-            assert.commandWorked(db.createView(viewName, backingCollName, []));
-        } else {
-            sourceCollection = collectionOrView;
-        }
-        for (let foreignCollInfo of foreignCollsInfo) {
-            const foreignCollName = collectionOrView.getName() + foreignCollInfo.suffix;
-            const foreignCollection = db[foreignCollName];
-            foreignCollection.drop();
-            const foreignBulk = foreignCollection.initializeUnorderedBulkOp();
-            for (let i = 0; i < nDocs; i++) {
-                foreignBulk.insert(foreignCollInfo.docGen(i));
-            }
-            foreignBulk.execute();
-        }
-        const sourceBulk = sourceCollection.initializeUnorderedBulkOp();
-        for (let i = 0; i < nDocs; i++) {
-            sourceBulk.insert(localDocGen(i));
-        }
-        sourceBulk.execute();
-    };
-}
 
 /**
  * Basic test case with a $unionWith stage.
  */
 generateTestCase({
     name: "UnionWith.Basic",
-    tags: ["unionWith"],
+    tags: ["unionWith", ">=4.3.5"],
     pre: function basicUnionFun(isView) {
         return basicMultiCollectionDataPopulator({
             isView: isView,
@@ -1411,7 +1411,7 @@ generateTestCase({
  */
 generateTestCase({
     name: "UnionWith.MultiLevel",
-    tags: ["unionWith"],
+    tags: ["unionWith", ">=4.3.5"],
     pre: function basicUnionFun(isView) {
         return basicMultiCollectionDataPopulator({
             isView: isView,
@@ -1464,7 +1464,7 @@ generateTestCase({
  */
 generateTestCase({
     name: "UnionWith.BlockingStage",
-    tags: ["unionWith"],
+    tags: ["unionWith", ">=4.3.5"],
     pre: function basicUnionFun(isView) {
         return basicMultiCollectionDataPopulator({
             isView: isView,
