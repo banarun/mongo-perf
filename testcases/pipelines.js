@@ -1473,7 +1473,6 @@ generateTestCase({
     }]
 });
 
-
 /**
  * Test case where a $unionWith'd pipeline has a blocking stage.
  */
